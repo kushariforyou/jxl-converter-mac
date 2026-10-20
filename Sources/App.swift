@@ -72,6 +72,9 @@ struct ContentView: View {
     @AppStorage("keepMetadata") private var keepMetadata = true
     @AppStorage("overwrite") private var overwrite = false
     @AppStorage("skipLarger") private var skipLarger = true
+    // Deliberately not remembered between launches, so it is never on by surprise.
+    @State private var deleteOriginals = false
+    @State private var confirmDelete = false
     @AppStorage("outputPath") private var outputPath = ""
 
     @State private var dropTargeted = false
@@ -103,6 +106,12 @@ struct ContentView: View {
             }
         }
         .navigationSubtitle(model.items.isEmpty ? "" : "\(model.items.count) images")
+        .alert("Delete original files?", isPresented: $confirmDelete) {
+            Button("Yes, Delete Originals", role: .destructive) { deleteOriginals = true }
+            Button("No", role: .cancel) {}
+        } message: {
+            Text("After all conversions have completed, the original of every file that converted successfully will be moved to the Trash.\n\nFiles that are skipped or fail are kept, and nothing is deleted if you stop the conversion.")
+        }
         .sheet(isPresented: Binding(get: { !model.pendingFolders.isEmpty },
                                     set: { if !$0 { model.pendingFolders = [] } })) {
             FolderImportSheet()
@@ -185,7 +194,7 @@ struct ContentView: View {
             TableColumn("Status") { item in
                 StatusView(item: item)
             }
-            .width(min: 90, ideal: 140)
+            .width(min: 90, ideal: 210)
         }
         .contextMenu(forSelectionType: UUID.self) { ids in
             let picked = model.items.filter { ids.contains($0.id) }
@@ -267,13 +276,17 @@ struct ContentView: View {
                     Text("\(model.finishedCount) of \(model.batchTotal) done")
                     Spacer()
                     if model.skippedCount > 0 {
-                        Text("\(model.skippedCount) kept").foregroundStyle(.secondary)
+                        Text("\(model.skippedCount) skipped").foregroundStyle(.secondary)
                     }
                     if model.failedCount > 0 {
                         Text("\(model.failedCount) failed").foregroundStyle(.red)
                     }
                 }
                 .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                if model.trashedCount > 0 {
+                    Label("\(model.trashedCount) original\(model.trashedCount == 1 ? "" : "s") moved to Trash", systemImage: "trash")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -351,13 +364,22 @@ struct ContentView: View {
                 .font(.caption)
                 .help(outputPath)
             }
-            Toggle("Keep original if JPEG XL is larger", isOn: $skipLarger)
-            Text("Already-compressed formats like HEIC often grow; those .jxl files are discarded.")
+            Toggle("Skip files that would get larger", isOn: $skipLarger)
+            Text("If the JPEG XL would be bigger than the original (common for HEIC), that file isn’t converted and no .jxl is saved.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("Overwrite existing .jxl files", isOn: $overwrite)
-            Text("Original files are never modified.")
-                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Delete originals after converting", isOn: Binding(
+                get: { deleteOriginals },
+                set: { on in if on { confirmDelete = true } else { deleteOriginals = false } }
+            ))
+            .disabled(model.isRunning)
+            Text(deleteOriginals
+                 ? "When all conversions finish, originals of successfully converted files go to the Trash."
+                 : "Original files are never modified.")
+                .font(.caption)
+                .foregroundStyle(deleteOriginals ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -376,7 +398,8 @@ struct ContentView: View {
                         keepMetadata: keepMetadata,
                         outputDir: outputPath.isEmpty ? nil : URL(fileURLWithPath: outputPath, isDirectory: true),
                         overwrite: overwrite,
-                        skipLarger: skipLarger))
+                        skipLarger: skipLarger),
+                                deleteOriginals: deleteOriginals)
                 } label: {
                     Label(model.pendingCount > 0 ? "Convert \(model.pendingCount) to JPEG XL" : "Convert to JPEG XL",
                           systemImage: "wand.and.stars")
@@ -531,7 +554,7 @@ struct StatusView: View {
             HStack(spacing: 4) {
                 Image(systemName: item.note == nil ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .foregroundStyle(item.note == nil ? .green : .orange)
-                Text(item.note ?? "Done")
+                Text(item.note ?? (item.originalTrashed ? "Done – original in Trash" : "Done"))
             }
             .help(item.output?.path ?? "")
         case .skipped(let msg):

@@ -8,9 +8,10 @@ A native macOS app for batch-converting images to **JPEG XL** (`.jxl`).
 - **Lossless** checkbox: JPEGs are repacked losslessly (about 20% smaller, restorable bit-for-bit); other formats are pixel-perfect
 - Lossy mode with a quality slider, plus an effort slider for speed vs. size
 - **Preserve EXIF & XMP metadata** (camera info, GPS, dates, rotation, file timestamps), or strip it
-- **Keep original if JPEG XL is larger**: discards outputs that grew (common for HEIC)
+- **Skip files that would get larger**: if the JPEG XL would be bigger than the original (common for HEIC), that file isn’t converted
+- **Delete originals after converting** (asks for confirmation first): once all conversions finish, originals of successfully converted files go to the Trash; skipped or failed files are kept
 - Live "space saved" total that counts up as each file finishes, with per-file savings
-- Converts several files in parallel; originals are never modified
+- Converts several files in parallel; originals are never modified unless you turn on Delete originals
 
 Looking for Windows? See [jxl-converter-windows](https://github.com/kushariforyou/jxl-converter-windows).
 

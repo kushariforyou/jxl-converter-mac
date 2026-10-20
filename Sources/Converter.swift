@@ -223,7 +223,7 @@ enum Converter {
         let newSize = size(of: out)
         if opts.skipLarger, newSize >= size(of: src) {
             try? fm.removeItem(at: out)
-            return .skipped("Kept original – JXL was larger")
+            return .skipped("Skipped – would be larger")
         }
         return .success(output: out, size: newSize, note: note)
     }

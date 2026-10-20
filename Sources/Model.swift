@@ -15,6 +15,7 @@ struct ConvItem: Identifiable {
     var output: URL?
     var status: ItemStatus = .pending
     var note: String?
+    var originalTrashed = false
 
     var savedFraction: Double? {
         guard let newSize, originalSize > 0 else { return nil }
@@ -34,6 +35,7 @@ final class ConverterModel: ObservableObject {
     @Published var doneCount = 0
     @Published var failedCount = 0
     @Published var skippedCount = 0
+    @Published var trashedCount = 0
     @Published var bytesIn: Int64 = 0
     @Published var bytesOut: Int64 = 0
     @Published var cjxlPath = Tools.find("cjxl")
@@ -98,6 +100,9 @@ final class ConverterModel: ObservableObject {
     /// Puts finished/failed files back in the queue (e.g. to try different settings).
     func requeueAll() {
         guard !isRunning else { return }
+        // Files whose originals went to the Trash can't be converted again.
+        items.removeAll { $0.originalTrashed }
+        selection.formIntersection(items.map(\.id))
         for i in items.indices {
             items[i].status = .pending
             items[i].newSize = nil
@@ -108,12 +113,14 @@ final class ConverterModel: ObservableObject {
     }
 
     private func resetStats() {
-        doneCount = 0; failedCount = 0; skippedCount = 0; bytesIn = 0; bytesOut = 0; batchTotal = 0
+        doneCount = 0; failedCount = 0; skippedCount = 0; trashedCount = 0; bytesIn = 0; bytesOut = 0; batchTotal = 0
     }
 
     // MARK: Converting
 
-    func start(_ opts: ConvertOptions) {
+    /// With `deleteOriginals`, once the whole batch has finished (and wasn't stopped) the originals of
+    /// successfully converted files are moved to the Trash. Skipped and failed files are left alone.
+    func start(_ opts: ConvertOptions, deleteOriginals: Bool) {
         guard !isRunning, let cjxl = cjxlPath else { return }
         let jobs = items.filter { $0.status == .pending }.map { Job(id: $0.id, source: $0.source, relativeDir: $0.relativeDir) }
         guard !jobs.isEmpty else { return }
@@ -142,7 +149,24 @@ final class ConverterModel: ObservableObject {
                     }
                 }
             }
+            if deleteOriginals && !runner.cancelled {
+                trashOriginals(of: Set(jobs.map(\.id)))
+            }
             isRunning = false
+        }
+    }
+
+    private func trashOriginals(of ids: Set<UUID>) {
+        for i in items.indices where ids.contains(items[i].id) && items[i].status == .done {
+            // Only remove the original when its .jxl is really there.
+            guard let output = items[i].output, Converter.size(of: output) > 0 else { continue }
+            do {
+                try FileManager.default.trashItem(at: items[i].source, resultingItemURL: nil)
+                items[i].originalTrashed = true
+                trashedCount += 1
+            } catch {
+                items[i].note = "Original couldn’t be moved to Trash"
+            }
         }
     }
 
