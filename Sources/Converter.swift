@@ -24,6 +24,51 @@ enum Outcome: Sendable {
     case failure(String)
 }
 
+/// File-type groups offered when adding a folder.
+enum FileKind: String, CaseIterable, Identifiable, Sendable {
+    case jpeg, png, gif, heic, tiff, webp, avif, bmp, raw, other
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .jpeg: "JPEG"
+        case .png: "PNG"
+        case .gif: "GIF"
+        case .heic: "HEIC / HEIF"
+        case .tiff: "TIFF"
+        case .webp: "WebP"
+        case .avif: "AVIF"
+        case .bmp: "BMP"
+        case .raw: "Camera RAW"
+        case .other: "Other"
+        }
+    }
+
+    var extensions: Set<String> {
+        switch self {
+        case .jpeg: ["jpg", "jpeg", "jpe"]
+        case .png: ["png", "apng"]
+        case .gif: ["gif"]
+        case .heic: ["heic", "heif", "hif"]
+        case .tiff: ["tif", "tiff"]
+        case .webp: ["webp"]
+        case .avif: ["avif"]
+        case .bmp: ["bmp"]
+        case .raw: ["dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2"]
+        case .other: ["psd", "tga", "jp2", "ico", "ppm", "pnm", "pgm", "pbm", "pam", "pfm", "exr"]
+        }
+    }
+
+    /// Shown as a tooltip, e.g. ".jpg, .jpeg, .jpe".
+    var detail: String { extensions.sorted().map { "." + $0 }.joined(separator: ", ") }
+}
+
+struct FoundFile: Sendable {
+    let url: URL
+    let relativeDir: String
+}
+
 // MARK: - External tools
 
 enum Tools {
@@ -85,6 +130,25 @@ enum Converter {
 
     static func isSupported(_ url: URL) -> Bool {
         supportedExts.contains(url.pathExtension.lowercased())
+    }
+
+    /// Lists matching images in a folder. `relativeDir` includes the folder's own name so a custom
+    /// output folder mirrors the original structure.
+    static func scanFolder(_ folder: URL, recursive: Bool, extensions: Set<String>) -> [FoundFile] {
+        let fm = FileManager.default
+        let root = folder.deletingLastPathComponent().standardizedFileURL.path
+        var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
+        if !recursive { options.insert(.skipsSubdirectoryDescendants) }
+        guard let e = fm.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: options) else { return [] }
+        var found: [FoundFile] = []
+        while let f = e.nextObject() as? URL {
+            guard extensions.contains(f.pathExtension.lowercased()),
+                  (try? f.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
+            let dir = f.deletingLastPathComponent().standardizedFileURL.path
+            let rel = String(dir.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            found.append(FoundFile(url: f, relativeDir: rel))
+        }
+        return found
     }
 
     static func convert(_ job: Job, opts: ConvertOptions, cjxl: String, exiftool: String?, runner: Runner) -> Outcome {

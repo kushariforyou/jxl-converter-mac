@@ -4,7 +4,7 @@ import AppKit
 @main
 struct JXLConverterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var model = ConverterModel()
+    @ObservedObject private var model = ConverterModel.shared
 
     var body: some Scene {
         Window("JXL Converter", id: "main") {
@@ -16,6 +16,9 @@ struct JXLConverterApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Add Images…") { model.showAddPanel() }
                     .keyboardShortcut("o")
+                    .disabled(model.isRunning)
+                Button("Add Folder…") { model.showAddFolderPanel() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
                     .disabled(model.isRunning)
             }
             // Replace Cut/Copy/Paste/Delete with the actions this app actually has.
@@ -34,6 +37,11 @@ struct JXLConverterApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Images or folders dropped on the Dock icon (or opened with the app) join the list.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated { ConverterModel.shared.add(urls) }
+    }
 
     // SwiftUI always adds a Help menu (with a search field) even when its items are removed,
     // so take it out of the menu bar whenever SwiftUI rebuilds the menus.
@@ -81,6 +89,10 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button { model.showAddPanel() } label: { Label("Add Images", systemImage: "plus") }
+                    .help("Add images (⌘O)")
+                    .disabled(model.isRunning)
+                Button { model.showAddFolderPanel() } label: { Label("Add Folder", systemImage: "folder.badge.plus") }
+                    .help("Add a folder of images (⇧⌘O)")
                     .disabled(model.isRunning)
                 Button { model.requeueAll() } label: { Label("Reset", systemImage: "arrow.counterclockwise") }
                     .help("Put all files back in the queue to convert again")
@@ -91,6 +103,10 @@ struct ContentView: View {
             }
         }
         .navigationSubtitle(model.items.isEmpty ? "" : "\(model.items.count) images")
+        .sheet(isPresented: Binding(get: { !model.pendingFolders.isEmpty },
+                                    set: { if !$0 { model.pendingFolders = [] } })) {
+            FolderImportSheet()
+        }
     }
 
     // MARK: File list
@@ -127,9 +143,12 @@ struct ContentView: View {
             Text("JPEG, PNG, GIF, HEIC, TIFF, WebP, AVIF, BMP, RAW and more")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Button("Choose Images…") { model.showAddPanel() }
-                .controlSize(.large)
-                .padding(.top, 4)
+            HStack(spacing: 10) {
+                Button("Choose Images…") { model.showAddPanel() }
+                Button("Choose Folder…") { model.showAddFolderPanel() }
+            }
+            .controlSize(.large)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -378,6 +397,110 @@ struct ContentView: View {
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url { outputPath = url.path }
+    }
+}
+
+// MARK: - Folder options
+
+/// Asks whether to include subfolders and which file types to pick up before adding a folder.
+struct FolderImportSheet: View {
+    @EnvironmentObject var model: ConverterModel
+    @AppStorage("folderRecursive") private var recursive = true
+    @AppStorage("folderExcludedKinds") private var excludedRaw = ""
+    @State private var found: [FoundFile]?
+
+    private var excluded: Set<FileKind> {
+        Set(excludedRaw.split(separator: ",").compactMap { FileKind(rawValue: String($0)) })
+    }
+    private var extensions: Set<String> {
+        FileKind.allCases.filter { !excluded.contains($0) }.reduce(into: Set()) { $0.formUnion($1.extensions) }
+    }
+    private var scanKey: String { "\(recursive)|\(excludedRaw)|\(model.pendingFolders.map(\.path))" }
+
+    private func setExcluded(_ kinds: Set<FileKind>) {
+        excludedRaw = kinds.map(\.rawValue).sorted().joined(separator: ",")
+    }
+
+    private func binding(_ kind: FileKind) -> Binding<Bool> {
+        Binding(get: { !excluded.contains(kind) },
+                set: { on in
+                    var ex = excluded
+                    if on { ex.remove(kind) } else { ex.insert(kind) }
+                    setExcluded(ex)
+                })
+    }
+
+    var body: some View {
+        let folders = model.pendingFolders
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(folders.count == 1 ? "Add “\(folders[0].lastPathComponent)”" : "Add \(folders.count) folders")
+                        .font(.headline)
+                    Text(folders.map { ($0.path as NSString).abbreviatingWithTildeInPath }.joined(separator: ", "))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Include subfolders", isOn: $recursive)
+                Text(recursive
+                     ? "Adds images from every folder inside, too."
+                     : "Only adds images directly inside the folder.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("File types").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Button("All") { setExcluded([]) }.buttonStyle(.link)
+                    Button("None") { setExcluded(Set(FileKind.allCases)) }.buttonStyle(.link)
+                }
+                LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
+                                    GridItem(.flexible(), alignment: .leading)],
+                          alignment: .leading, spacing: 6) {
+                    ForEach(FileKind.allCases) { kind in
+                        Toggle(kind.title, isOn: binding(kind)).help(kind.detail)
+                    }
+                }
+            }
+
+            Divider()
+
+            HStack {
+                if let found {
+                    Text(found.isEmpty ? "No matching images" : "\(found.count) image\(found.count == 1 ? "" : "s") found")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView().controlSize(.small)
+                    Text("Scanning…").foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") { model.pendingFolders = [] }
+                    .keyboardShortcut(.cancelAction)
+                Button(found.map { $0.isEmpty ? "Add" : "Add \($0.count) Image\($0.count == 1 ? "" : "s")" } ?? "Add") {
+                    model.addFound(found ?? [])
+                    model.pendingFolders = []
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(found?.isEmpty ?? true)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .task(id: scanKey) {
+            found = nil
+            let folders = model.pendingFolders, recursive = recursive, exts = extensions
+            let result = await Task.detached {
+                folders.flatMap { Converter.scanFolder($0, recursive: recursive, extensions: exts) }
+            }.value
+            if !Task.isCancelled { found = result }
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 enum ItemStatus: Equatable {
     case pending, converting, done, skipped(String), failed(String)
@@ -23,8 +24,12 @@ struct ConvItem: Identifiable {
 
 @MainActor
 final class ConverterModel: ObservableObject {
+    static let shared = ConverterModel()
+
     @Published var items: [ConvItem] = []
     @Published var selection = Set<UUID>()
+    /// Folders waiting for the user to pick import options; the folder sheet shows while this is non-empty.
+    @Published var pendingFolders: [URL] = []
     @Published var isRunning = false
     @Published var doneCount = 0
     @Published var failedCount = 0
@@ -49,34 +54,29 @@ final class ConverterModel: ObservableObject {
 
     // MARK: Adding files
 
+    /// Files are added straight away; folders open the folder options sheet first.
     func add(_ urls: [URL]) {
-        let fm = FileManager.default
-        var known = Set(items.map { $0.source.standardizedFileURL.path })
-        var added: [ConvItem] = []
-
-        func append(_ url: URL, rel: String) {
-            let path = url.standardizedFileURL.path
-            guard Converter.isSupported(url), !known.contains(path) else { return }
-            known.insert(path)
-            added.append(ConvItem(source: url, relativeDir: rel, originalSize: Converter.size(of: url)))
-        }
-
+        guard !isRunning else { return }
+        var files: [FoundFile] = []
         for url in urls {
             var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
             if isDir.boolValue {
-                let root = url.deletingLastPathComponent().standardizedFileURL.path
-                let e = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey],
-                                      options: [.skipsHiddenFiles, .skipsPackageDescendants])
-                while let f = e?.nextObject() as? URL {
-                    guard (try? f.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
-                    let dir = f.deletingLastPathComponent().standardizedFileURL.path
-                    let rel = String(dir.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                    append(f, rel: rel)
-                }
+                if !pendingFolders.contains(url) { pendingFolders.append(url) }
             } else {
-                append(url, rel: "")
+                files.append(FoundFile(url: url, relativeDir: ""))
             }
+        }
+        addFound(files)
+    }
+
+    func addFound(_ found: [FoundFile]) {
+        var known = Set(items.map { $0.source.standardizedFileURL.path })
+        var added: [ConvItem] = []
+        for f in found where Converter.isSupported(f.url) {
+            let path = f.url.standardizedFileURL.path
+            guard known.insert(path).inserted else { continue }
+            added.append(ConvItem(source: f.url, relativeDir: f.relativeDir, originalSize: Converter.size(of: f.url)))
         }
         added.sort { $0.source.path.localizedStandardCompare($1.source.path) == .orderedAscending }
         items.append(contentsOf: added)
@@ -184,10 +184,21 @@ final class ConverterModel: ObservableObject {
     func showAddPanel() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
+        panel.canChooseDirectories = false
         panel.canChooseFiles = true
+        panel.allowedContentTypes = Converter.supportedExts.compactMap { UTType(filenameExtension: $0) }
         panel.prompt = "Add"
-        panel.message = "Choose images or folders to convert to JPEG XL"
+        panel.message = "Choose images to convert to JPEG XL"
+        if panel.runModal() == .OK { add(panel.urls) }
+    }
+
+    func showAddFolderPanel() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Choose"
+        panel.message = "Choose folders of images to convert to JPEG XL"
         if panel.runModal() == .OK { add(panel.urls) }
     }
 }
